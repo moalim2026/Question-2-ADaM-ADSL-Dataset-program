@@ -1,0 +1,269 @@
+> #Question 2: ADaM ADSL Dataset Creation 
+> 
+> library(admiral)
+> library(dplyr, warn.conflicts = FALSE)
+> library(pharmaversesdtm)
+> library(lubridate)
+> library(stringr)
+> 
+> library(tibble) # added 
+> 
+> 
+> dm <- pharmaversesdtm::dm
+> vs <- pharmaversesdtm::vs
+> ex <- pharmaversesdtm::ex
+> ds <- pharmaversesdtm::ds
+> ae <- pharmaversesdtm::ae
+> 
+> dm <- convert_blanks_to_na(dm)
+> vs <- convert_blanks_to_na(vs)
+> ex <- convert_blanks_to_na(ex)
+> ds <- convert_blanks_to_na(ds)
+> ae <- convert_blanks_to_na(ae)
+> 
+> adsl <- dm
+>   
+>   
+> #AGEGR9 & AGEGR9N Age grouping into the following categories: “<18”, “18 - 50”, “>50” 
+> 
+> # Create lookup tables
+> agegr9_lookup <- exprs(
++   ~condition,           ~AGEGR9,
++   AGE < 18,               "<18",
++   between(AGE, 18, 50), "18-50",
++   AGE > 50,               ">50",
++   is.na(AGE),         "Missing"
++ )
+> 
+> agegr9N_lookup <- exprs(
++   ~condition,           ~AGEGR9N,
++   AGE < 18,               1,
++   between(AGE, 18, 50),   2,
++   AGE > 50,               3,
++   is.na(AGE),             .
++ )
+> 
+> adsl <- adsl %>%
++   derive_vars_cat(
++     definition = agegr9_lookup
++   ) 
+> 
+> adsl <- adsl %>%
++   mutate(
++     AGEGR9N = case_when(
++       AGE < 18 ~ 1,
++       between(AGE, 18, 50) ~ 2,
++       AGE > 50 ~ 3,
++       is.na(AGE) ~ NA_real_   # Use NA_real_ for numeric missing values
++     )
++   )
+> 
+> 
+> # Impute start and end time of exposure to first and last respectively,
+> # Do not impute date
+> ex_ext <- ex %>%
++   derive_vars_dtm(
++     dtc = EXSTDTC,
++     new_vars_prefix = "EXST"
++   ) %>%
++   derive_vars_dtm(
++     dtc = EXENDTC,
++     new_vars_prefix = "EXEN",
++     time_imputation = "last"
++   )
+> 
+> adsl <- adsl %>%
++   derive_vars_merged(
++     dataset_add = ex_ext,
++     filter_add = (EXDOSE > 0 |
++                     (EXDOSE == 0 &
++                        str_detect(EXTRT, "PLACEBO"))) & !is.na(EXSTDTM),
++     new_vars = exprs(TRTSDTM = EXSTDTM, TRTSTMF = EXSTTMF),
++     order = exprs(EXSTDTM, EXSEQ),
++     mode = "first",
++     by_vars = exprs(STUDYID, USUBJID)
++   ) %>%
++   derive_vars_merged(
++     dataset_add = ex_ext,
++     filter_add = (EXDOSE > 0 |
++                     (EXDOSE == 0 &
++                        str_detect(EXTRT, "PLACEBO"))) & !is.na(EXENDTM),
++     new_vars = exprs(TRTEDTM = EXENDTM, TRTETMF = EXENTMF),
++     order = exprs(EXENDTM, EXSEQ),
++     mode = "last",
++     by_vars = exprs(STUDYID, USUBJID)
++   )
+> 
+> #ITTFL  “Y”/”N” flag identifying patients who have been randomized, that is, 
+> #where ARM is populated in pharmaversesdtm::dm domain. 
+> adsl <- adsl %>%
++   derive_var_merged_exist_flag(
++     dataset_add = dm,
++     by_vars = exprs(STUDYID, USUBJID),
++     new_var = ITTFL,
++     false_value = "N",
++     missing_value = "N",
++     condition = !is.na(ARM)
++   )
+> 
+> #Derive the Last Date Known Alive (LSTAVLDT)
+> #LSTAVLDT 
+> #Last known alive date using any vital signs visit date, any adverse event 
+> #start date, any disposition record and any exposure record.
+> 
+> adsl <- adsl %>%
++   derive_vars_extreme_event(
++     by_vars = exprs(STUDYID, USUBJID),
++     events = list(
++       event(
++         dataset_name = "vs",
++         order = exprs(VSDTC, VSSEQ),
++         condition = !is.na(VSDTC) & !is.na(VSSTRESN) & !is.na(VSSTRESC),
++         set_values_to = exprs(
++           LSTAVLDT = convert_dtc_to_dt(VSDTC, highest_imputation = "M"),
++           seq = VSSEQ
++         )
++       ),
++       event(
++         dataset_name = "ae",
++         order = exprs(AESTDTC, AESEQ),
++         condition = !is.na(AESTDTC),
++         set_values_to = exprs(
++           LSTAVLDT = convert_dtc_to_dt(AESTDTC, highest_imputation = "M"),
++           seq = AESEQ
++         )
++       ),
++       event(
++         dataset_name = "ds",
++         order = exprs(DSSTDTC, DSSEQ),
++         condition = !is.na(DSSTDTC),
++         set_values_to = exprs(
++           LSTAVLDT = convert_dtc_to_dt(DSSTDTC, highest_imputation = "M"),
++           seq = DSSEQ
++         )
++       ),
++       event(
++         dataset_name = "ex",
++         order = exprs(EXSTDTC, EXSEQ),
++         condition = !is.na(EXSTDTC),
++         set_values_to = exprs(
++           LSTAVLDT = convert_dtc_to_dt(EXSTDTC, highest_imputation = "M"),
++           seq = EXSEQ
++         )
++       )
++     ),
++     source_datasets = list(vs = vs, ae = ae, ds = ds, ex = ex),
++     tmp_event_nr_var = event_nr,
++     order = exprs(LSTAVLDT, seq, event_nr),
++     mode = "last",
++     new_vars = exprs(LSTAVLDT)
++     )
+> 
+> 
+> # Load the package
+> library(writexl)
+> 
+> # Save as Excel
+> write_xlsx(adsl, path = "C:\\Users\\ja-mo\\OneDrive\\Desktop\\R programming\\Data\\question 2 ADaM ADSL\\adam.adsl.xlsx")
+> 
+> # Set path for the log file
+> log_file <- "C:\\Users\\ja-mo\\OneDrive\\Desktop\\R programming\\Data\\adam.adsl.xlsx" 
+> 
+> # Start capturing console output
+> sink(log_file, split = TRUE)   # split=TRUE also keeps showing in console
+> 
+> ## Run the logged
+> summary(adsl)
+   STUDYID             DOMAIN            USUBJID             SUBJID            RFSTDTC         
+ Length:306         Length:306         Length:306         Length:306         Length:306        
+ Class :character   Class :character   Class :character   Class :character   Class :character  
+ Mode  :character   Mode  :character   Mode  :character   Mode  :character   Mode  :character  
+                                                                                               
+                                                                                               
+                                                                                               
+                                                                                               
+   RFENDTC            RFXSTDTC           RFXENDTC           RFICDTC            RFPENDTC        
+ Length:306         Length:306         Length:306         Length:306         Length:306        
+ Class :character   Class :character   Class :character   Class :character   Class :character  
+ Mode  :character   Mode  :character   Mode  :character   Mode  :character   Mode  :character  
+                                                                                               
+                                                                                               
+                                                                                               
+                                                                                               
+    DTHDTC             DTHFL              SITEID            BRTHDTC               AGE       
+ Length:306         Length:306         Length:306         Length:306         Min.   :50.00  
+ Class :character   Class :character   Class :character   Class :character   1st Qu.:70.25  
+ Mode  :character   Mode  :character   Mode  :character   Mode  :character   Median :77.00  
+                                                                             Mean   :75.09  
+                                                                             3rd Qu.:81.00  
+                                                                             Max.   :89.00  
+                                                                                            
+     AGEU               SEX                RACE              ETHNIC             ARMCD          
+ Length:306         Length:306         Length:306         Length:306         Length:306        
+ Class :character   Class :character   Class :character   Class :character   Class :character  
+ Mode  :character   Mode  :character   Mode  :character   Mode  :character   Mode  :character  
+                                                                                               
+                                                                                               
+                                                                                               
+                                                                                               
+     ARM              ACTARMCD            ACTARM            COUNTRY             DMDTC          
+ Length:306         Length:306         Length:306         Length:306         Length:306        
+ Class :character   Class :character   Class :character   Class :character   Class :character  
+ Mode  :character   Mode  :character   Mode  :character   Mode  :character   Mode  :character  
+                                                                                               
+                                                                                               
+                                                                                               
+                                                                                               
+      DMDY        AGEGR9             AGEGR9N         TRTSDTM                         TRTSTMF         
+ Min.   :-37   Length:306         Min.   :2.000   Min.   :2012-07-09 00:00:00.00   Length:306        
+ 1st Qu.:-14   Class :character   1st Qu.:3.000   1st Qu.:2013-01-26 06:00:00.00   Class :character  
+ Median :-10   Mode  :character   Median :3.000   Median :2013-06-13 12:00:00.00   Mode  :character  
+ Mean   :-11                      Mean   :2.997   Mean   :2013-06-17 12:28:20.78                     
+ 3rd Qu.: -7                      3rd Qu.:3.000   3rd Qu.:2013-11-07 06:00:00.00                     
+ Max.   : -2                      Max.   :3.000   Max.   :2014-09-02 00:00:00.00                     
+ NA's   :52                                       NA's   :52                                         
+    TRTEDTM                         TRTETMF             ITTFL              LSTAVLDT         
+ Min.   :2012-08-28 23:59:59.00   Length:306         Length:306         Min.   :2012-08-13  
+ 1st Qu.:2013-05-10 23:59:59.00   Class :character   Class :character   1st Qu.:2013-06-03  
+ Median :2013-09-30 23:59:59.00   Mode  :character   Mode  :character   Median :2013-10-14  
+ Mean   :2013-10-10 19:42:50.43                                         Mean   :2013-10-20  
+ 3rd Qu.:2014-03-10 11:59:59.00                                         3rd Qu.:2014-03-12  
+ Max.   :2015-03-05 23:59:59.00                                         Max.   :2015-03-05  
+ NA's   :54                                                                                 
+> sessionInfo()
+R version 4.4.0 (2024-04-24 ucrt)
+Platform: x86_64-w64-mingw32/x64
+Running under: Windows 11 x64 (build 26100)
+
+Matrix products: default
+
+
+locale:
+[1] LC_COLLATE=English_United States.utf8  LC_CTYPE=English_United States.utf8   
+[3] LC_MONETARY=English_United States.utf8 LC_NUMERIC=C                          
+[5] LC_TIME=English_United States.utf8    
+
+time zone: America/New_York
+tzcode source: internal
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] stringr_1.5.1         lubridate_1.9.3       pharmaversesdtm_1.4.0 admiral_1.4.1        
+ [5] writexl_1.5.4         sdtm.oak_0.2.0        dplyr_1.2.0           tibble_3.3.1         
+ [9] rtables_0.6.15        magrittr_2.0.4        formatters_0.5.12    
+
+loaded via a namespace (and not attached):
+ [1] compiler_4.4.0       tidyselect_1.2.1     xml2_1.3.6           assertthat_0.2.1    
+ [5] tidyr_1.3.1          pharmaverseraw_0.1.1 fastmap_1.2.0        R6_2.5.1            
+ [9] generics_0.1.3       admiraldev_1.4.0     knitr_1.46           backports_1.5.0     
+[13] checkmate_2.3.4      pillar_1.9.0         rlang_1.1.7          utf8_1.2.4          
+[17] stringi_1.8.4        roxygen2_7.3.3       xfun_0.44            timechange_0.3.0    
+[21] cli_3.6.2            withr_3.0.0          digest_0.6.35        grid_4.4.0          
+[25] rstudioapi_0.16.0    hms_1.1.3            lifecycle_1.0.5      vctrs_0.7.1         
+[29] glue_1.7.0           fansi_1.0.6          purrr_1.0.2          tools_4.4.0         
+[33] pkgconfig_2.0.3      htmltools_0.5.8.1   
+> 
+> # Stop capturing
+> sink()
